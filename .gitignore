@@ -1,2 +1,2 @@
 asr_testing/
-models/*.pt
+*.pt

@@ -7,9 +7,7 @@ import numpy as np
 
 class ASRModel(ABC):
     def __init__(self, device: Optional[str] = None):
-        if torch.backends.mps.is_available():
-            device = "mps"  # Use MPS for Apple Silicon
-        elif torch.cuda.is_available():
+        if torch.cuda.is_available():
             device = "cuda"  # Use CUDA for NVIDIA GPUs
         else:
             device = "cpu"  # Default to CPU
@@ -17,7 +15,7 @@ class ASRModel(ABC):
         self.device = device
         self.model = None
         self.processor = None
-        self.sampling_rate = None
+        self.sampling_rate = 16000  # Default sample rate for ASR models
     
     @abstractmethod
     def load_model(self) -> None:
@@ -32,7 +30,7 @@ class ASRModel(ABC):
         """
         pass
 
-    def stream(self, audio_chunk: Union[np.ndarray, bytes], **kwargs) -> Dict[str, Any]:
+    def stream(self, **kwargs) -> Dict[str, Any]:
         """
         Process streaming audio input
         Default implementation treats it as a single chunk
@@ -46,14 +44,12 @@ class ASRModel(ABC):
             start_time = time.perf_counter()
             result = func(*args, **kwargs)
             end_time = time.perf_counter()
-            
+
             if isinstance(result, dict):
-                result['latency'] = end_time - start_time
+                result["latency"] = end_time - start_time
             else:
-                result = {
-                    'text': result,
-                    'latency': end_time - start_time
-                }
+                result = {"text": result, "latency": end_time - start_time}
+
             return result
         return wrapper
 

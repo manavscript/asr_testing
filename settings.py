@@ -1,5 +1,6 @@
 from pathlib import Path
 from root_path import get_project_root
+import json
 
 class Settings:
     # Base paths
@@ -8,6 +9,10 @@ class Settings:
     METRICS_DIR = ROOT / "metrics"
     CONFIG_DIR = ROOT / "config"
     RESULTS_DIR = ROOT / "results"
+
+    with open("config.json", "r") as f:
+        config = json.load(f)
+    HF_TOKEN = config.get("huggingface_token", "")
     
     @classmethod
     def setup_directories(cls):

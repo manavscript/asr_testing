@@ -13,29 +13,51 @@ from datetime import datetime
 from datasets import load_dataset
 from jiwer import wer, cer
 from settings import Settings  # Importing settings for RESULTS_DIR
+import torch
+from models.whisper_model import WhisperModel  
+from utils.measurements import compute_hindi_cer, compute_hindi_wer
+import torchaudio
+
+hf_token = Settings.HF_TOKEN
 
 # Ensure results directory exists
 os.makedirs(Settings.RESULTS_DIR, exist_ok=True)
 
 # Define available datasets
 DATASETS = {
-    "Common Voice": lambda: load_dataset("mozilla-foundation/common_voice_15_0", "hi", split="test"),
-    "KathBath": lambda: load_dataset("kathbath/hindi_speech_dataset", split="test"),
-    "IndicTTS": lambda: load_dataset("iisc/IndicTTS", "hi", split="test")
+    "Common Voice": lambda: load_dataset("mozilla-foundation/common_voice_17_0", "hi", split="test", streaming=True, trust_remote_code=True),
+    "KathBath": lambda: load_dataset("ai4bharat/kathbath", name = "hi", split="test", language="hi", streaming=True, trust_remote_code=True),
+    "IndicST": lambda: load_dataset("ai4bharat/IndicVoices-ST", "indic2en", split="hindi", streaming=True, trust_remote_code=True),
+    "IndicSuperb": lambda: load_dataset("collabora/indic-superb", split="test", streaming=True, trust_remote_code=True)
 }
 
 # Convert speech to 16kHz mono audio
-def preprocess_audio(audio_path):
-    """
-    Load an audio file and convert it to 16kHz mono format.
-    Args:
-        audio_path: Path to the audio file.
-    Returns:
-        waveform: 1D NumPy array of audio samples.
-        sr: Sampling rate (should be 16kHz).
-    """
-    waveform, sr = librosa.load(audio_path, sr=16000, mono=True)
-    return waveform, sr
+# def preprocess_audio(audio_path):
+#     """
+#     Load an audio file and convert it to 16kHz mono format.
+#     Args:
+#         audio_path: Path to the audio file.
+#     Returns:
+#         waveform: 1D NumPy array of audio samples.
+#         sr: Sampling rate (should be 16kHz).
+#     """
+#     waveform, sr = librosa.load(audio_path, sr=16000, mono=True)
+#     return waveform, sr
+
+def process_audio(example, sr):
+    audio_tensor = torch.tensor(example["audio"]["array"])  # Convert to tensor
+    orig_sr = example["audio"]["sampling_rate"]
+
+    # Ensure the audio is mono (convert stereo to mono if needed)
+    if audio_tensor.ndim > 1 and audio_tensor.shape[0] > 1:
+        audio_tensor = torch.mean(audio_tensor, dim=0, keepdim=True)  # Convert stereo to mono
+
+    # Resample if needed
+    if orig_sr != sr:
+        resampler = torchaudio.transforms.Resample(orig_freq=orig_sr, new_freq=sr)
+        audio_tensor = resampler(audio_tensor)
+
+    return {"audio": {"array": audio_tensor.numpy(), "sampling_rate": sr}}
 
 class Evaluator:
     def __init__(self, model, num_samples=50, vad=False, streaming=False):
@@ -53,6 +75,12 @@ class Evaluator:
         self.streaming = streaming
         self.results_dir = Settings.RESULTS_DIR
 
+        if torch.cuda.is_available():
+            device = "cuda"
+        else:
+            device = "cpu"
+        self.device = device
+
     def evaluate(self):
         """
         Runs evaluation on all datasets.
@@ -65,22 +93,30 @@ class Evaluator:
 
         for dataset_name, load_func in DATASETS.items():
             dataset = load_func()
-            sampled_data = random.sample(list(dataset), min(self.num_samples, len(dataset)))
+            # sampled_data = random.sample(list(dataset), min(self.num_samples, len(dataset)))
             dataset_results = []
 
-            for sample in sampled_data:
+            for sample in dataset:
                 ref_text = sample["sentence"]
                 audio_path = sample["path"]
 
                 # Load and preprocess audio
-                audio, sr = preprocess_audio(audio_path)
+                data_audio = process_audio(audio_path, sr=16000)
+                audio, sr = data_audio["audio"], data_audio["sampling_rate"]
 
                 # Get ASR transcription
+                if self.device == "cuda" and self.model == WhisperModel:
+                    audio = torch.tensor(audio, dtype=torch.float16, device=self.device)  # Convert to float16
+                else:
+                    audio = torch.tensor(audio, dtype=torch.float32, device=self.device)
+                
                 pred_text = self.model.transcribe(audio)
 
                 # Compute WER and CER
-                wer_score = wer(ref_text, pred_text)
-                cer_score = cer(ref_text, pred_text)
+                # wer_score = wer(ref_text, pred_text["text"])
+                # cer_score = cer(ref_text, pred_text["text"])
+                wer_score = compute_hindi_wer(ref_text, pred_text["text"])
+                cer_score = compute_hindi_cer(ref_text, pred_text["text"])
 
                 result_entry = {
                     "Model": self.model.__class__.__name__,
@@ -90,21 +126,24 @@ class Evaluator:
                     "VAD": self.vad,
                     "Streaming": self.streaming,
                     "Reference": ref_text,
-                    "Prediction": pred_text,
+                    "Prediction": pred_text["text"],
                     "Audio Path": audio_path
                 }
 
                 dataset_results.append(result_entry)
                 all_results.append(result_entry)
 
-                print(f"[{self.model.__class__.__name__}] ({dataset_name}) REF: {ref_text} | PRED: {pred_text} | WER: {wer_score:.2f} | CER: {cer_score:.2f}")
+                print(f"[{self.model.__class__.__name__}] ({dataset_name}) REF: {ref_text} | PRED: {pred_text['text']} | WER: {wer_score:.2f} | CER: {cer_score:.2f}")
 
             # Save individual dataset results
-            dataset_filename = os.path.join(self.results_dir, f"{dataset_name.replace(' ', '_').lower()}_{timestamp}.csv")
+            os.makedirs(os.path.join(self.results_dir, self.model.__class__.__name__), exist_ok=True)
+
+            dataset_filename = os.path.join(self.results_dir, self.model.__class__.__name__, f"{dataset_name.replace(' ', '_').lower()}_{timestamp}.csv")
             pd.DataFrame(dataset_results).to_csv(dataset_filename, index=False)
 
         # Save summary results
-        summary_filename = os.path.join(self.results_dir, f"summary_results_{timestamp}.csv")
+        os.makedirs(os.path.join(self.results_dir, self.model.__class__.__name__), exist_ok=True)
+        summary_filename = os.path.join(self.results_dir,  self.model.__class__.__name__, f"summary_results_{timestamp}.csv")
         pd.DataFrame(all_results).to_csv(summary_filename, index=False)
 
         avg_wer = np.mean([r["WER"] for r in all_results])
@@ -127,11 +166,8 @@ def main():
 
     args = parser.parse_args()
 
-    # Import the Whisper model dynamically
-    from models.whisper_model import WhisperModel  
-
     # Initialize Whisper model
-    asr_model = WhisperModel(use_vad=args.vad, model_size="medium")
+    asr_model = WhisperModel(use_vad=args.vad, model_size="medium", stream=args.streaming)
     asr_model.load_model()
 
     # Initialize evaluator

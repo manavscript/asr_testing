@@ -18,6 +18,7 @@ import pandas as pd
 import logging
 from settings import Settings
 import os
+from base_model import ASRModel
 
 @dataclass
 class TranscriptionMetrics:
@@ -42,12 +43,15 @@ class StreamingMetrics:
     empty_chunks: int
     peak_memory: float
 
-class WhisperModel:
+class WhisperModel(ASRModel):
     def __init__(self, 
                  model_size: str = "large-v2",
                  device: Optional[str] = None,
                  compute_type: str = "float16",
-                 use_vad: bool = True):
+                 use_vad: bool = True,
+                 stream: bool = True):         
+        super().__init__(device)
+
         """
         Initialize Whisper model with specified configuration
         
@@ -63,6 +67,7 @@ class WhisperModel:
         self.use_vad = use_vad
         self.model = None
         self.audio_buffer = deque(maxlen=5)
+        self.streaming = stream
         
         # Setup logging
         logging.basicConfig(
@@ -73,14 +78,17 @@ class WhisperModel:
         
         # Device selection
         if device is None:
-            if torch.backends.mps.is_available():
-                device = "mps"
-                self.compute_type = "float32"  # MPS requires float32
-            elif torch.cuda.is_available():
+            if torch.cuda.is_available():
                 device = "cuda"
             else:
+                self.compute_type = "float32"
                 device = "cpu"
+        
+        if device == "cpu":
+            self.compute_type = "float32"
+        
         self.device = device
+        
         
         # Initialize VAD if requested
         if self.use_vad:
@@ -145,6 +153,8 @@ class WhisperModel:
                     raise FileNotFoundError(f"Audio file '{audio_path}' not found.")
                 audio = whisper.load_audio(audio_path)
             elif isinstance(audio_path, np.ndarray) and len(audio_path.shape) == 1:
+                audio = audio_path
+            elif isinstance(audio_path, torch.Tensor) and len(audio_path.shape) == 1:
                 audio = audio_path
             else:
                 raise ValueError("Invalid audio input. Must be a file path or a 1D NumPy array.")
@@ -269,7 +279,7 @@ class WhisperModel:
                 yield {"text": "", "is_final": True}
 
 
-    def stream_transcribe(self, chunk_duration=2.0, overlap_duration=0.5):
+    def stream(self, chunk_duration=2.0, overlap_duration=0.5):
         """
         Performs real-time streaming transcription with overlap handling.
 
@@ -320,12 +330,12 @@ class WhisperModel:
         metrics_dict = asdict(metrics)
         
         # Save JSON
-        json_path = Settings.METRICS_DIR / f"{mode}_metrics_{timestamp}.json"
-        with open(json_path, 'w') as f:
-            json.dump(metrics_dict, f, indent=2)
+        # json_path = Settings.METRICS_DIR / f"{mode}_metrics_{timestamp}.json"
+        # with open(json_path, 'w') as f:
+        #     json.dump(metrics_dict, f, indent=2)
         
         # Save CSV
-        csv_path = Settings.METRICS_DIR / f"{mode}_metrics.csv"
+        csv_path = Settings.METRICS_DIR / f"{mode}_{self.model_size}_{self.streaming}_metrics.csv"
         df = pd.DataFrame([metrics_dict])
         if csv_path.exists():
             df.to_csv(csv_path, mode='a', header=False, index=False)

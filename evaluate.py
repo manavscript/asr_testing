@@ -14,11 +14,18 @@ from datasets import load_dataset
 from jiwer import wer, cer
 from settings import Settings  # Importing settings for RESULTS_DIR
 import torch
-from models.whisper_model import WhisperModel  
+from models.whisper_model import WhisperModel
+from models.wave2vec2 import Wav2Vec2HindiASR  
+from models.sarvam import SarvamAIASR
 from utils.measurements import compute_hindi_cer, compute_hindi_wer
 import torchaudio
+from torchaudio.transforms import Resample
+from pydub import AudioSegment
+from utils.preprocess_audio import load_audio_with_librosa, preprocess_audio, process_audio, process_audio_array
+from tqdm import tqdm
 
 hf_token = Settings.HF_TOKEN
+Settings.setup_directories()
 
 # Ensure results directory exists
 os.makedirs(Settings.RESULTS_DIR, exist_ok=True)
@@ -26,38 +33,11 @@ os.makedirs(Settings.RESULTS_DIR, exist_ok=True)
 # Define available datasets
 DATASETS = {
     "Common Voice": lambda: load_dataset("mozilla-foundation/common_voice_17_0", "hi", split="test", streaming=True, trust_remote_code=True),
-    "KathBath": lambda: load_dataset("ai4bharat/kathbath", name = "hi", split="test", language="hi", streaming=True, trust_remote_code=True),
-    "IndicST": lambda: load_dataset("ai4bharat/IndicVoices-ST", "indic2en", split="hindi", streaming=True, trust_remote_code=True),
+    # "KathBath": lambda: load_dataset("ai4bharat/kathbath", name = "hi", split="test", language="hi", streaming=True, trust_remote_code=True),
+    # "IndicST": lambda: load_dataset("ai4bharat/IndicVoices-ST", "indic2en", split="hindi", streaming=True, trust_remote_code=True),
     "IndicSuperb": lambda: load_dataset("collabora/indic-superb", split="test", streaming=True, trust_remote_code=True)
 }
 
-# Convert speech to 16kHz mono audio
-# def preprocess_audio(audio_path):
-#     """
-#     Load an audio file and convert it to 16kHz mono format.
-#     Args:
-#         audio_path: Path to the audio file.
-#     Returns:
-#         waveform: 1D NumPy array of audio samples.
-#         sr: Sampling rate (should be 16kHz).
-#     """
-#     waveform, sr = librosa.load(audio_path, sr=16000, mono=True)
-#     return waveform, sr
-
-def process_audio(example, sr):
-    audio_tensor = torch.tensor(example["audio"]["array"])  # Convert to tensor
-    orig_sr = example["audio"]["sampling_rate"]
-
-    # Ensure the audio is mono (convert stereo to mono if needed)
-    if audio_tensor.ndim > 1 and audio_tensor.shape[0] > 1:
-        audio_tensor = torch.mean(audio_tensor, dim=0, keepdim=True)  # Convert stereo to mono
-
-    # Resample if needed
-    if orig_sr != sr:
-        resampler = torchaudio.transforms.Resample(orig_freq=orig_sr, new_freq=sr)
-        audio_tensor = resampler(audio_tensor)
-
-    return {"audio": {"array": audio_tensor.numpy(), "sampling_rate": sr}}
 
 class Evaluator:
     def __init__(self, model, num_samples=50, vad=False, streaming=False):
@@ -95,14 +75,36 @@ class Evaluator:
             dataset = load_func()
             # sampled_data = random.sample(list(dataset), min(self.num_samples, len(dataset)))
             dataset_results = []
+            sample_num = 1
 
-            for sample in dataset:
-                ref_text = sample["sentence"]
-                audio_path = sample["path"]
+            for sample in tqdm(dataset, total=self.num_samples):
+                print(sample)
+
+                if "sentence" in sample:
+                    ref_text = sample["sentence"]
+                elif "text" in sample:
+                    ref_text = sample["text"]
+                elif "transcription" in sample:
+                    ref_text = sample["transcription"]
+                else:
+                    print("Missing ref text")
+                    raise LookupError("Cannot find ref text")
+                
+                audio_data = {}
+
+                if "audio" in sample:
+                    audio_path = sample["audio"]["path"]
+                    audio_data = sample["audio"]
+                elif "chunked_audio_filepath" in sample:
+                    audio_path = sample["chunked_audio_filepath"]["path"]
+                    audio_data = sample["chunked_audio_filepath"]
+                else:
+                    print("Missing audio path")
+                    raise LookupError("Cannot audio path")
 
                 # Load and preprocess audio
-                data_audio = process_audio(audio_path, sr=16000)
-                audio, sr = data_audio["audio"], data_audio["sampling_rate"]
+                data_audio = process_audio_array(audio_data["array"], orig_sr = audio_data["sampling_rate"], target_sr=16000)
+                audio, sr = data_audio["array"], data_audio["sampling_rate"]
 
                 # Get ASR transcription
                 if self.device == "cuda" and self.model == WhisperModel:
@@ -113,8 +115,6 @@ class Evaluator:
                 pred_text = self.model.transcribe(audio)
 
                 # Compute WER and CER
-                # wer_score = wer(ref_text, pred_text["text"])
-                # cer_score = cer(ref_text, pred_text["text"])
                 wer_score = compute_hindi_wer(ref_text, pred_text["text"])
                 cer_score = compute_hindi_cer(ref_text, pred_text["text"])
 
@@ -127,13 +127,20 @@ class Evaluator:
                     "Streaming": self.streaming,
                     "Reference": ref_text,
                     "Prediction": pred_text["text"],
-                    "Audio Path": audio_path
+                    "Audio Path": audio_path,
+                    "Latency": pred_text["processing_time"],
+                    "Duration": pred_text["audio_duration"]
                 }
 
                 dataset_results.append(result_entry)
                 all_results.append(result_entry)
 
                 print(f"[{self.model.__class__.__name__}] ({dataset_name}) REF: {ref_text} | PRED: {pred_text['text']} | WER: {wer_score:.2f} | CER: {cer_score:.2f}")
+
+                if sample_num == self.num_samples:
+                    break
+                else:
+                    sample_num += 1
 
             # Save individual dataset results
             os.makedirs(os.path.join(self.results_dir, self.model.__class__.__name__), exist_ok=True)
@@ -159,7 +166,7 @@ class Evaluator:
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate an ASR model on benchmarks.")
-    parser.add_argument("--model", type=str, default="whisper", choices=["whisper"], help="Choose ASR model")
+    parser.add_argument("--model", type=str, default="whisper", choices=["whisper", "wave2vec2", "sarvam"], help="Choose ASR model")
     parser.add_argument("--num_samples", type=int, default=50, help="Number of samples per dataset")
     parser.add_argument("--vad", action="store_true", help="Enable Voice Activity Detection (VAD)")
     parser.add_argument("--streaming", action="store_true", help="Enable streaming mode")
@@ -167,7 +174,13 @@ def main():
     args = parser.parse_args()
 
     # Initialize Whisper model
-    asr_model = WhisperModel(use_vad=args.vad, model_size="medium", stream=args.streaming)
+    if args.model == "whisper":
+        asr_model = WhisperModel(use_vad=args.vad, model_size="medium", stream=args.streaming)
+    elif args.model == "wave2vec2":
+        asr_model = Wav2Vec2HindiASR(use_vad=args.vad)
+    elif args.model == "sarvam":
+        asr_model = SarvamAIASR(language_code="hi-IN")
+
     asr_model.load_model()
 
     # Initialize evaluator

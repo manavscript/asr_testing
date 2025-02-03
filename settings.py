@@ -17,5 +17,6 @@ class Settings:
     @classmethod
     def setup_directories(cls):
         """Create necessary directories"""
+        print("creating dirs")
         for path in [cls.MODELS_DIR, cls.METRICS_DIR, cls.CONFIG_DIR]:
             path.mkdir(parents=True, exist_ok=True)

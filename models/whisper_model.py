@@ -200,7 +200,9 @@ class WhisperModel(ASRModel):
                 "text": result["text"],
                 "segments": result["segments"],
                 "language": result["language"],
-                "metrics": asdict(metrics)
+                "metrics": asdict(metrics),
+                "processing_time": end_time - start_time,
+                "audio_duration": audio_duration,
             }
             
         except Exception as e:
@@ -360,8 +362,8 @@ class WhisperModel(ASRModel):
         )
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        json_path = Settings.METRICS_DIR / f"streaming_metrics_{timestamp}.json"
-        csv_path = Settings.METRICS_DIR / f"streaming_metrics.csv"
+        json_path = Settings.METRICS_DIR / f"{self.model_size}_whisper_streaming_metrics_{timestamp}.json"
+        csv_path = Settings.METRICS_DIR / f"{self.model_size}_whisper_streaming_metrics.csv"
 
         with open(json_path, 'w') as f:
             json.dump(asdict(metrics), f, indent=2)
@@ -389,7 +391,7 @@ if __name__ == "__main__":
     
     # Streaming example
     try:
-        for result in model.stream_transcribe(chunk_duration=2.0):
+        for result in model.stream(chunk_duration=2.0):
             if result["text"]:
                 print(f"\rTranscription: {result['text']}", end="")
                 print(f"\nChunk latency: {result['latency']:.3f}s")

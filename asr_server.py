@@ -6,6 +6,8 @@ import whisper
 import soundfile as sf
 from pydub import AudioSegment  # Import Pydub for conversion
 from models.whisper_model import WhisperModel
+from models.wave2vec2 import Wav2Vec2HindiASR
+from models.sarvam import SarvamAIASR
 import io
 
 app = FastAPI()
@@ -13,6 +15,8 @@ app = FastAPI()
 # Load ASR Models
 AVAILABLE_MODELS = {
     "Whisper-Medium": WhisperModel(model_size="medium", device="cuda" if torch.cuda.is_available() else "cpu"),
+    "Wave2Vec2": Wav2Vec2HindiASR(),
+    "Sarvam": SarvamAIASR(language_code="hi-IN")
 }
 
 # Load models at startup
@@ -30,7 +34,6 @@ async def transcribe_audio(
     asr_model = AVAILABLE_MODELS[model_name]
     
     try:
-        start_time = time.time()
 
         # Convert M4A to WAV if needed
         if file.filename.endswith(".m4a"):
@@ -61,9 +64,12 @@ async def transcribe_audio(
             audio_data = np.mean(audio_data, axis=1)  # Convert to mono
 
         # Run ASR
+        start_time = time.time()
         result = asr_model.transcribe(audio_data)
 
         end_time = time.time()
+        print(result)
+        
         latency = round(end_time - start_time, 3)
 
         return {

@@ -12,7 +12,7 @@ st.title("🎤 Real-time ASR with Model Selection")
 st.write("Upload an audio file (MP3, WAV, M4A) or **record your voice** to transcribe.")
 
 # Step 1: Select ASR Model
-model_choice = st.selectbox("🛠 Select ASR Model:", ["Whisper-Medium", "Whisper-Small"])
+model_choice = st.selectbox("🛠 Select ASR Model:", ["Whisper-Medium", "Wave2Vec2", "Sarvam"])
 
 # Step 2: Choose Input Method
 option = st.radio("📂 Select Input Method:", ["Upload Audio", "🎙️ Record Audio"])
